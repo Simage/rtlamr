@@ -183,6 +183,7 @@ func (rcvr *Receiver) Run() {
 				logMsg.Offset, _ = sampleFile.Seek(0, os.SEEK_CUR)
 				logMsg.Length = sampleBuf.Len()
 				logMsg.Message = msg
+				logMsg.MessageType = msg.MsgType()
 
 				// Encode the message
 				err := encoder.Encode(logMsg)
