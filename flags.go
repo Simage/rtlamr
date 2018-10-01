@@ -28,8 +28,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bemasher/rtlamr/csv"
-	"github.com/bemasher/rtlamr/protocol"
+	"github.com/simage/rtlamr/csv"
+	"github.com/simage/rtlamr/protocol"
 )
 
 var sampleFilename = flag.String("samplefile", os.DevNull, "raw signal dump file")

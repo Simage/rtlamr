@@ -32,12 +32,12 @@ import (
 	"github.com/simage/rtlamr/protocol"
 	"github.com/bemasher/rtltcp"
 
-	_ "github.com/bemasher/rtlamr/idm"
-	_ "github.com/bemasher/rtlamr/netidm"
-	_ "github.com/bemasher/rtlamr/r900"
-	_ "github.com/bemasher/rtlamr/r900bcd"
-	_ "github.com/bemasher/rtlamr/scm"
-	_ "github.com/bemasher/rtlamr/scmplus"
+	_ "github.com/simage/rtlamr/idm"
+	_ "github.com/simage/rtlamr/netidm"
+	_ "github.com/simage/rtlamr/r900"
+	_ "github.com/simage/rtlamr/r900bcd"
+	_ "github.com/simage/rtlamr/scm"
+	_ "github.com/simage/rtlamr/scmplus"
 )
 
 var rcvr Receiver

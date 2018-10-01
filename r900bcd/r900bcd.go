@@ -21,8 +21,8 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/bemasher/rtlamr/protocol"
-	"github.com/bemasher/rtlamr/r900"
+	"github.com/simage/rtlamr/protocol"
+	"github.com/simage/rtlamr/r900"
 )
 
 func init() {

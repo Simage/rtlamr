@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bemasher/rtlamr/csv"
+	"github.com/simage/rtlamr/csv"
 )
 
 const (
@@ -23,7 +23,7 @@ type NewParserFunc func(symbolLength int) Parser
 // Given a name and a parser, register a parser for use.
 // Later used by underscore improting each parser package:
 //
-// import _ "github.com/bemasher/rtlamr/scm"
+// import _ "github.com/simage/rtlamr/scm"
 //
 func RegisterParser(name string, parserFn NewParserFunc) {
 	parserMutex.Lock()
