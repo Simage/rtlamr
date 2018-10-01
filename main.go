@@ -29,7 +29,7 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/bemasher/rtlamr/protocol"
+	"github.com/simage/rtlamr/protocol"
 	"github.com/bemasher/rtltcp"
 
 	_ "github.com/bemasher/rtlamr/idm"
