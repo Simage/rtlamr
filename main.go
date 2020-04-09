@@ -17,20 +17,20 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
-	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"time"
 
-	"github.com/simage/rtlamr/protocol"
 	"github.com/bemasher/rtltcp"
+	"github.com/pkg/errors"
+	"github.com/simage/rtlamr/protocol"
 
 	_ "github.com/simage/rtlamr/idm"
 	_ "github.com/simage/rtlamr/netidm"
@@ -46,10 +46,16 @@ type Receiver struct {
 	rtltcp.SDR
 	d  protocol.Decoder
 	fc protocol.FilterChain
+
+	stop chan struct{}
+
+	err error
 }
 
 func (rcvr *Receiver) NewReceiver() {
 	rcvr.d = protocol.NewDecoder()
+
+	rcvr.stop = make(chan struct{}, 1)
 
 	// If the msgtype "all" is given alone, register and use scm, scm+, idm and r900.
 	if _, all := msgType["all"]; all && len(msgType) == 1 {
@@ -74,8 +80,8 @@ func (rcvr *Receiver) NewReceiver() {
 	rcvr.d.Allocate()
 
 	// Connect to rtl_tcp server.
-	if err := rcvr.Connect(nil); err != nil {
-		log.Fatal(err)
+	if rcvr.err = rcvr.Connect(nil); rcvr.err != nil {
+		log.Fatalf("%+v", errors.Wrap(rcvr.err, "rcvr.Connect"))
 	}
 
 	cfg := rcvr.d.Cfg
@@ -105,12 +111,18 @@ func (rcvr *Receiver) NewReceiver() {
 		rcvr.SetGainMode(true)
 	}
 
+	rcvr.d.Cfg = cfg
 	rcvr.d.Log()
 
 	// Tell the user how many gain settings were reported by rtl_tcp.
 	log.Println("GainCount:", rcvr.SDR.Info.GainCount)
 
 	return
+}
+
+func (rcvr *Receiver) Close() {
+	rcvr.stop <- struct{}{}
+	rcvr.SDR.Close()
 }
 
 func (rcvr *Receiver) Run() {
@@ -127,26 +139,67 @@ func (rcvr *Receiver) Run() {
 	sampleBuf := new(bytes.Buffer)
 	start := time.Now()
 
-	// Allocate a channel of blocks and a sync.Pool for allocating/reusing
-	// sample blocks.
+	// Allocate a channel of blocks.
 	blockCh := make(chan []byte)
 
-	// Read sample blocks from the pipe created and fed above.
-	go func() {
-		buf := bufio.NewReaderSize(rcvr, 1<<20)
+	// Make maps for tracking messages spanning sample blocks.
+	prev := map[protocol.Digest]bool{}
+	next := map[protocol.Digest]bool{}
 
+	// Read and send sample blocks to the decoder.
+	go func() {
+		// Make two sample blocks, one for reading, and one for the receiver to
+		// decode, these are exchanged each time we read a new block.
 		blockA := make([]byte, rcvr.d.Cfg.BlockSize2)
 		blockB := make([]byte, rcvr.d.Cfg.BlockSize2)
 
+		// When exiting this goroutine, close the block channel.
+		defer close(blockCh)
+
 		for {
-			// Read new sample block.
-			_, err := io.ReadFull(buf, blockA)
-			if err != nil {
-				log.Println("Error reading samples: ", err)
-				continue
+			select {
+			// Exit if we've been told to stop.
+			case <-rcvr.stop:
+				return
+			default:
+				rcvr.err = rcvr.SetDeadline(time.Now().Add(5 * time.Second))
+				if rcvr.err != nil {
+					rcvr.err = errors.Wrap(rcvr.err, "rcvr.SetDeadline")
+					return
+				}
+
+				// Read new sample block.
+				_, rcvr.err = io.ReadFull(rcvr, blockA)
+				rcvr.err = errors.Wrap(rcvr.err, "io.ReadFull")
+
+				// If we get an EOF, exit.
+				if rcvr.err == io.EOF || rcvr.err == io.ErrUnexpectedEOF {
+					return
+				}
+
+				if rcvr.err != nil {
+					switch err := rcvr.err.(type) {
+					// If we get a network operation error.
+					case *net.OpError:
+						if err.Temporary() {
+							// If temporary, keep trying to read.
+							continue
+						} else {
+							// If it's not temporary, exit.
+							return
+						}
+					default:
+						// For everything else, assume it's fatal and bail.
+						return
+					}
+				}
+
+				// Send the sample block.
+				blockCh <- blockA
+
+				// Exchange blocks for next read.
+				blockA, blockB = blockB, blockA
 			}
-			blockCh <- blockA
-			blockA, blockB = blockB, blockA
 		}
 	}()
 
@@ -158,7 +211,17 @@ func (rcvr *Receiver) Run() {
 		case <-tLimit:
 			log.Println("Time Limit Reached:", time.Since(start))
 			return
-		case block := <-blockCh:
+		case block, ok := <-blockCh:
+			// If blockCh is closed, exit.
+			if !ok {
+				return
+			}
+
+			// Clear next map for this sample block.
+			for key := range next {
+				delete(next, key)
+			}
+
 			// If dumping samples, discard the oldest block from the buffer if
 			// it's full and write the new block to it.
 			if *sampleFilename != os.DevNull {
@@ -182,18 +245,27 @@ func (rcvr *Receiver) Run() {
 				logMsg.Time = time.Now()
 				logMsg.Offset, _ = sampleFile.Seek(0, os.SEEK_CUR)
 				logMsg.Length = sampleBuf.Len()
+				logMsg.Type = msg.MsgType()
 				logMsg.Message = msg
 				logMsg.MessageType = msg.MsgType()
 
-				// Encode the message
-				err := encoder.Encode(logMsg)
-				if err != nil {
-					log.Fatal("Error encoding message: ", err)
+				// This should be unique enough to identify a message between blocks.
+				msgDigest := protocol.NewDigest(msg)
+
+				// Mark the message as seen for the next loop.
+				next[msgDigest] = true
+
+				// If the message was seen in the previous loop, skip it.
+				if prev[msgDigest] {
+					continue
 				}
 
-				// The XML encoder doesn't write new lines after each element, print them.
-				if _, ok := encoder.(*xml.Encoder); ok {
-					fmt.Println()
+				// Encode the message
+				rcvr.err = encoder.Encode(logMsg)
+				rcvr.err = errors.Wrap(rcvr.err, "encoder.Encode")
+
+				if rcvr.err != nil {
+					return
 				}
 
 				pktFound = true
@@ -217,6 +289,9 @@ func (rcvr *Receiver) Run() {
 					return
 				}
 			}
+
+			// Swap next and previous digest maps.
+			next, prev = prev, next
 		}
 	}
 }
@@ -249,8 +324,14 @@ func main() {
 
 	rcvr.NewReceiver()
 
-	defer sampleFile.Close()
-	defer rcvr.Close()
+	defer func() {
+		sampleFile.Close()
+		rcvr.Close()
+
+		if rcvr.err != nil {
+			log.Fatalf("%+v\n", rcvr.err)
+		}
+	}()
 
 	rcvr.Run()
 }
